@@ -51,7 +51,7 @@ pipeline {
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             pip install cyclonedx-bom && \
-                            cyclonedx-py-requirements -o bom.xml && \
+                            cyclonedx-py requirements requirements.txt -o bom.xml && \
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -H 'X-Api-Key: ${DT_API_KEY}' \
