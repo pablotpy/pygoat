@@ -50,6 +50,7 @@ pipeline {
                     echo "Generando SBOM y enviando a Dependency Track..."
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
+                            apt-get update && apt-get install -y curl && \
                             pip install cyclonedx-bom && \
                             cyclonedx-py requirements requirements.txt -o bom.xml && \
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
