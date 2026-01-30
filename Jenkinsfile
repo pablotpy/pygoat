@@ -7,7 +7,6 @@ pipeline {
         DD_API_KEY = credentials('dd-api-key')
         DT_API_KEY = credentials('dt-api-key')
         DD_ENGAGEMENT_ID = '4' 
-        // Mapeamos el workspace actual para que el script sea visible dentro de docker
         DOCKER_ARGS = '--rm --entrypoint="" --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
     }
 
@@ -56,19 +55,16 @@ pipeline {
             }
         }
 
-        stage('SCA - Dependency Track (Script File)') {
+        stage('SCA - Dependency Track (Enriched SBOM)') {
             steps {
                 script {
-                    // PASO 1: Creamos el script BASH complejo en un archivo separado
-                    // Esto evita errores de sintaxis y comillas en Jenkins
                     def dtScript = """#!/bin/bash
                     set -e
-                    
                     echo "--- Instalando herramientas ---"
                     apt-get update -qq && apt-get install -y curl -qq
                     pip install cyclonedx-bom -q
                     
-                    echo "--- Generando BOM ---"
+                    echo "--- Generando BOM Local ---"
                     cyclonedx-py requirements requirements.txt -o bom_local.json
                     
                     echo "--- Subiendo BOM a DT ---"
@@ -81,78 +77,64 @@ pipeline {
                         -F "bom=@bom_local.json"
                     
                     echo ""
-                    echo "--- BUCLE 1: Obteniendo UUID del Proyecto ---"
+                    echo "--- BUCLE 1: Obteniendo UUID ---"
                     PROJECT_UUID=""
-                    
-                    # Intentamos 5 veces obtener el UUID (esperando a que se cree)
                     for i in 1 2 3 4 5; do
                         curl -s -H "X-Api-Key: \$DT_API_KEY" "\$DT_URL/api/v1/project/lookup?name=Pygoat&version=1.0" > dt_project.json
-                        
-                        # Si el archivo tiene datos y tiene el campo uuid
                         if [ -s dt_project.json ]; then
-                            # Python seguro para extraer
                             UUID_EXTRACTED=\$(cat dt_project.json | python3 -c "import sys, json; print(json.load(sys.stdin).get('uuid', ''))" 2>/dev/null)
-                            
                             if [ ! -z "\$UUID_EXTRACTED" ]; then
                                 PROJECT_UUID=\$UUID_EXTRACTED
                                 echo "UUID Encontrado: \$PROJECT_UUID"
                                 break
                             fi
                         fi
-                        echo "Intento \$i: Proyecto no listo. Esperando 5s..."
+                        echo "Esperando creación del proyecto..."
                         sleep 5
                     done
                     
-                    if [ -z "\$PROJECT_UUID" ]; then
-                        echo "ERROR: No se pudo obtener el UUID."
-                        exit 1
-                    fi
+                    if [ -z "\$PROJECT_UUID" ]; then echo "ERROR: No UUID"; exit 1; fi
                     
-                    echo "--- BUCLE 2: Esperando Findings (Analysis) ---"
+                    echo "--- BUCLE 2: Esperando Análisis ---"
                     SUCCESS=0
-                    # 20 intentos de 10 segundos = 200 segundos max
+                    # Esperamos a que la API de Findings devuelva datos (señal de que acabó)
                     for i in \$(seq 1 20); do
-                        echo "Intento \$i de 20: Descargando..."
-                        
-                        curl -s -H "X-Api-Key: \$DT_API_KEY" \
-                            "\$DT_URL/api/v1/finding/project/\$PROJECT_UUID?suppressed=false" \
-                            -o dt_findings.json
-                        
-                        # Verificamos tamano (>10 bytes significa que hay datos JSON reales, no [])
-                        SIZE=\$(wc -c < dt_findings.json)
-                        echo "Tamaño recibido: \$SIZE bytes"
+                        echo "Intento \$i: Verificando estado..."
+                        curl -s -H "X-Api-Key: \$DT_API_KEY" "\$DT_URL/api/v1/finding/project/\$PROJECT_UUID?suppressed=false" -o check_status.json
+                        SIZE=\$(wc -c < check_status.json)
                         
                         if [ "\$SIZE" -gt 10 ]; then
-                            echo "¡Datos recibidos!"
+                            echo "¡Análisis completo detectado!"
                             SUCCESS=1
                             break
                         else
-                            echo "Analisis incompleto. Esperando 10s..."
+                            echo "DT sigue analizando. Esperando 10s..."
                             sleep 10
                         fi
                     done
                     
-                    if [ \$SUCCESS -eq 0 ]; then
-                        echo "WARNING: Timeout agotado. Creando archivo vacio para no romper pipeline."
-                        echo '[]' > dt_findings.json
+                    if [ \$SUCCESS -eq 1 ]; then
+                        echo "--- Descargando BOM Enriquecido (Con Vulnerabilidades) ---"
+                        # CAMBIO CLAVE: Descargamos el BOM completo, no la lista suelta de findings
+                        curl -s -H "X-Api-Key: \$DT_API_KEY" \
+                            "\$DT_URL/api/v1/bom/cyclonedx/project/\$PROJECT_UUID" \
+                            -o bom_enriched.json
+                            
+                        echo "BOM descargado. Tamaño: \$(wc -c < bom_enriched.json)"
+                    else
+                        echo "WARNING: Timeout. Usando BOM local (sin vulns) para no romper pipeline."
+                        cp bom_local.json bom_enriched.json
                     fi
-                    
-                    ls -lh dt_findings.json
                     """
                     
-                    // Escribimos el archivo en el workspace
-                    writeFile file: 'run_dt_analysis.sh', text: dtScript
+                    writeFile file: 'run_dt.sh', text: dtScript
+                    sh "chmod +x run_dt.sh"
                     
-                    // Damos permisos de ejecución
-                    sh "chmod +x run_dt_analysis.sh"
-                    
-                    echo "--- Ejecutando Script dentro de Docker ---"
-                    // Pasamos las variables de entorno con -e para que el script las vea
                     sh """
                         docker run ${DOCKER_ARGS} \
                             -e DT_URL='${DT_URL}' \
                             -e DT_API_KEY='${DT_API_KEY}' \
-                            python:3.10-slim /bin/bash ./run_dt_analysis.sh
+                            python:3.10-slim /bin/bash ./run_dt.sh
                     """
                 }
             }
@@ -162,7 +144,8 @@ pipeline {
             steps {
                 script {
                     echo "--- Subiendo Reportes ---"
-                    sh "ls -lh bandit_report.json gitleaks_report.json dt_findings.json"
+                    // Ahora buscamos bom_enriched.json
+                    sh "ls -lh bandit_report.json gitleaks_report.json bom_enriched.json"
                     
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
@@ -190,7 +173,9 @@ pipeline {
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@gitleaks_report.json' && \
                             
-                            # 3. DT FINDINGS
+                            # 3. ENRICHED SBOM (Como CycloneDX Scan)
+                            # Este es el estándar de oro. DefectDojo leerá las vulnerabilidades
+                            # que Dependency-Track escribió dentro de este JSON.
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
@@ -198,9 +183,9 @@ pipeline {
                                 -F 'verified=true' \
                                 -F 'minimum_severity=High' \
                                 -F 'close_old_findings=true' \
-                                -F 'scan_type=Dependency Track Finding Packaging Format (FPF)' \
+                                -F 'scan_type=CycloneDX Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
-                                -F 'file=@dt_findings.json' \
+                                -F 'file=@bom_enriched.json' \
                         "
                     """
                 }
