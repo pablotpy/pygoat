@@ -47,22 +47,20 @@ pipeline {
 stage('SCA - Dependency Track') {
             steps {
                 script {
-                    echo "--- Generando SBOM (Versión Clásica JSON) ---"
+                    echo "--- Generando SBOM (JSON Nativo) ---"
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             apt-get update && apt-get install -y curl && \
+                            pip install cyclonedx-bom && \
                             
-                            # 1. INSTALAMOS LA VERSIÓN ANTIGUA ESPECÍFICA
-                            pip install cyclonedx-bom==3.11.1 && \
-                            
-                            # 2. USAMOS EL COMANDO ANTIGUO (Ahora sí funcionará)
-                            # Generamos en JSON (-f json) que es el nativo de esta versión
-                            cyclonedx-py-requirements -f json -o bom.json && \
+                            # Generamos el SBOM. Usamos -o para salida. 
+                            # Al llamarlo .json, la herramienta suele detectar el formato o usar el default (JSON).
+                            cyclonedx-py requirements requirements.txt -o bom.json && \
                             
                             echo 'Verificando archivo BOM:' && \
                             ls -lh bom.json && \
                             
-                            # 3. ENVIAMOS EL JSON A DEPENDENCY TRACK
+                            # Subimos el JSON a Dependency Track
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -H 'X-Api-Key: ${DT_API_KEY}' \
