@@ -6,8 +6,8 @@ pipeline {
         DD_URL = 'http://django-defectdojo-nginx-1:8080'
         DD_API_KEY = credentials('dd-api-key')
         DT_API_KEY = credentials('dt-api-key')
-        DD_ENGAGEMENT_ID = '4' 
-        // IMPORTANTE: Agregamos --entrypoint="" para poder ejecutar comandos bash antes de gitleaks
+        DD_ENGAGEMENT_ID = '3' 
+        // Configuración Docker base (Entrypoint vacío para poder usar bash)
         DOCKER_ARGS = '--rm --entrypoint="" --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
     }
 
@@ -18,7 +18,6 @@ pipeline {
         
         stage('Checkout (Full Master)') {
             steps {
-                // Descargamos TODA la historia (depth: 0) de la rama MASTER
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: '*/master']], 
@@ -36,7 +35,6 @@ pipeline {
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             pip install bandit && \
-                            # Filtro estricto: Solo Altas (-lll) y Confianza Alta (-iii)
                             bandit -r . -lll -iii -f json -o bandit_report.json || true && \
                             ls -lh bandit_report.json \
                         "
@@ -70,12 +68,10 @@ pipeline {
         stage('Secrets - Gitleaks (Nuclear)') {
             steps {
                 script {
-                    echo "--- Ejecutando Gitleaks v8.18.1 (Modo Histórico Total) ---"
-                    // 1. Usamos la versión v8.18.1 (específica)
-                    // 2. Configuramos safe.directory para que Docker pueda leer el .git
-                    // 3. Usamos --log-opts=--all para leer TODO el historial de git
+                    echo "--- Ejecutando Gitleaks v8.18.1 ---"
+                    // CAMBIO AQUI: Agregado '-u root:root' antes de la imagen
                     sh """
-                        docker run ${DOCKER_ARGS} zricethezav/gitleaks:v8.18.1 /bin/bash -c " \
+                        docker run ${DOCKER_ARGS} -u root:root zricethezav/gitleaks:v8.18.1 /bin/bash -c " \
                             git config --global --add safe.directory '*' && \
                             gitleaks detect -v --source . --log-opts='--all' --report-path gitleaks_report.json --exit-code 0 \
                         "
@@ -88,7 +84,6 @@ pipeline {
             steps {
                 script {
                     echo "--- Subiendo Reportes ---"
-                    // Recuerda borrar el engagement viejo para ver el cambio real
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
