@@ -48,12 +48,12 @@ pipeline {
             steps {
                 script {
                     echo "--- Generando SBOM (XML) ---"
-                    // CORRECCIÓN: Agregamos '--format xml'
+                    // CORRECCIÓN: Banderas (-o, --format) van ANTES del archivo requirements.txt
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             apt-get update && apt-get install -y curl && \
                             pip install cyclonedx-bom && \
-                            cyclonedx-py requirements requirements.txt --format xml --output bom.xml && \
+                            cyclonedx-py requirements --format xml --output bom.xml requirements.txt && \
                             echo 'Verificando archivo BOM:' && \
                             ls -lh bom.xml && \
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
