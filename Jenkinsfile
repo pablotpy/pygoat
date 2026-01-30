@@ -7,7 +7,7 @@ pipeline {
         DD_URL = 'http://django-defectdojo-nginx-1:8080'
         DD_API_KEY = credentials('dd-api-key')
         DT_API_KEY = credentials('dt-api-key')
-        DD_ENGAGEMENT_ID = '5'
+        DD_ENGAGEMENT_ID = '6'
         DOCKER_ARGS = '--rm --entrypoint="" --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
     }
 
