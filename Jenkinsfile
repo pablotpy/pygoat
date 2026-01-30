@@ -47,11 +47,14 @@ pipeline {
             steps {
                 script {
                     echo "--- Generando SBOM ---"
+                    // Generamos el bom.json que se usará tanto para DT como para DefectDojo
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             apt-get update && apt-get install -y curl && \
                             pip install cyclonedx-bom && \
                             cyclonedx-py requirements requirements.txt -o bom.json && \
+                            
+                            # Subida a Dependency Track (Como antes)
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -H 'X-Api-Key: ${DT_API_KEY}' \
@@ -65,11 +68,10 @@ pipeline {
             }
         }
 
-        stage('Secrets - Gitleaks (Nuclear)') {
+        stage('Secrets - Gitleaks') {
             steps {
                 script {
                     echo "--- Ejecutando Gitleaks v8.18.1 ---"
-                    // CAMBIO AQUI: Agregado '-u root:root' antes de la imagen
                     sh """
                         docker run ${DOCKER_ARGS} -u root:root zricethezav/gitleaks:v8.18.1 /bin/bash -c " \
                             git config --global --add safe.directory '*' && \
@@ -83,9 +85,14 @@ pipeline {
         stage('Upload to DefectDojo') {
             steps {
                 script {
-                    echo "--- Subiendo Reportes ---"
+                    echo "--- Subiendo TODOS los Reportes (Bandit, Gitleaks, SBOM) ---"
+                    
+                    // Verificamos que los 3 archivos existan antes de empezar
+                    sh "ls -lh bandit_report.json gitleaks_report.json bom.json"
+                    
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
+                            # 1. Subir BANDIT
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
@@ -95,6 +102,8 @@ pipeline {
                                 -F 'scan_type=Bandit Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@bandit_report.json' && \
+                            
+                            # 2. Subir GITLEAKS
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
@@ -103,7 +112,20 @@ pipeline {
                                 -F 'close_old_findings=true' \
                                 -F 'scan_type=Gitleaks Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
-                                -F 'file=@gitleaks_report.json' \
+                                -F 'file=@gitleaks_report.json' && \
+                            
+                            # 3. Subir SBOM (CycloneDX)
+                            # Esto hará que DefectDojo procese las dependencias
+                            curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
+                                -H 'Authorization: Token ${DD_API_KEY}' \
+                                -H 'Content-Type: multipart/form-data' \
+                                -F 'active=true' \
+                                -F 'verified=true' \
+                                -F 'minimum_severity=Critical' \
+                                -F 'close_old_findings=true' \
+                                -F 'scan_type=CycloneDX Scan' \
+                                -F 'engagement=${DD_ENGAGEMENT_ID}' \
+                                -F 'file=@bom.json' \
                         "
                     """
                 }
