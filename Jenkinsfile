@@ -55,7 +55,7 @@ pipeline {
             }
         }
 
-        stage('SCA - Dependency Track (Enriched SBOM)') {
+        stage('SCA - Dependency Track (Force Download)') {
             steps {
                 script {
                     def dtScript = """#!/bin/bash
@@ -96,34 +96,35 @@ pipeline {
                     if [ -z "\$PROJECT_UUID" ]; then echo "ERROR: No UUID"; exit 1; fi
                     
                     echo "--- BUCLE 2: Esperando Análisis ---"
-                    SUCCESS=0
-                    # Esperamos a que la API de Findings devuelva datos (señal de que acabó)
-                    for i in \$(seq 1 20); do
-                        echo "Intento \$i: Verificando estado..."
+                    # Intentamos detectar si terminó. Si no termina, seguimos igual.
+                    for i in \$(seq 1 10); do
                         curl -s -H "X-Api-Key: \$DT_API_KEY" "\$DT_URL/api/v1/finding/project/\$PROJECT_UUID?suppressed=false" -o check_status.json
                         SIZE=\$(wc -c < check_status.json)
                         
                         if [ "\$SIZE" -gt 10 ]; then
-                            echo "¡Análisis completo detectado!"
-                            SUCCESS=1
+                            echo "¡Vulnerabilidades detectadas! Análisis listo."
                             break
                         else
-                            echo "DT sigue analizando. Esperando 10s..."
+                            echo "Intento \$i: Sin vulnerabilidades reportadas aún. Esperando 10s..."
                             sleep 10
                         fi
                     done
                     
-                    if [ \$SUCCESS -eq 1 ]; then
-                        echo "--- Descargando BOM Enriquecido (Con Vulnerabilidades) ---"
-                        # CAMBIO CLAVE: Descargamos el BOM completo, no la lista suelta de findings
-                        curl -s -H "X-Api-Key: \$DT_API_KEY" \
-                            "\$DT_URL/api/v1/bom/cyclonedx/project/\$PROJECT_UUID" \
-                            -o bom_enriched.json
-                            
-                        echo "BOM descargado. Tamaño: \$(wc -c < bom_enriched.json)"
+                    echo "--- Descargando BOM Enriquecido (Pase lo que pase) ---"
+                    # CAMBIO CRITICO: No importa si hubo timeout o si hay 0 vulns.
+                    # Descargamos SIEMPRE el BOM del servidor, que es el que vale.
+                    
+                    HTTP_CODE=\$(curl -s -w "%{http_code}" -H "X-Api-Key: \$DT_API_KEY" \
+                        "\$DT_URL/api/v1/bom/cyclonedx/project/\$PROJECT_UUID" \
+                        -o bom_enriched.json)
+                    
+                    echo "Codigo HTTP Descarga: \$HTTP_CODE"
+                    
+                    if [ "\$HTTP_CODE" != "200" ]; then
+                         echo "ERROR: Falló la descarga desde DT. Usando local por emergencia."
+                         cp bom_local.json bom_enriched.json
                     else
-                        echo "WARNING: Timeout. Usando BOM local (sin vulns) para no romper pipeline."
-                        cp bom_local.json bom_enriched.json
+                         echo "Descarga exitosa. Tamaño: \$(wc -c < bom_enriched.json)"
                     fi
                     """
                     
@@ -144,7 +145,6 @@ pipeline {
             steps {
                 script {
                     echo "--- Subiendo Reportes ---"
-                    // Ahora buscamos bom_enriched.json
                     sh "ls -lh bandit_report.json gitleaks_report.json bom_enriched.json"
                     
                     sh """
@@ -173,9 +173,7 @@ pipeline {
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@gitleaks_report.json' && \
                             
-                            # 3. ENRICHED SBOM (Como CycloneDX Scan)
-                            # Este es el estándar de oro. DefectDojo leerá las vulnerabilidades
-                            # que Dependency-Track escribió dentro de este JSON.
+                            # 3. ENRICHED SBOM
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
