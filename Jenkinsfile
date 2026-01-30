@@ -44,25 +44,32 @@ pipeline {
             }
         }
 
-        stage('SCA - Dependency Track') {
+stage('SCA - Dependency Track') {
             steps {
                 script {
-                    echo "--- Generando SBOM (XML) ---"
-                    // CORRECCIÓN: Banderas (-o, --format) van ANTES del archivo requirements.txt
+                    echo "--- Generando SBOM (Versión Clásica JSON) ---"
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             apt-get update && apt-get install -y curl && \
-                            pip install cyclonedx-bom && \
-                            cyclonedx-py requirements --format xml --output bom.xml requirements.txt && \
+                            
+                            # 1. INSTALAMOS LA VERSIÓN ANTIGUA ESPECÍFICA
+                            pip install cyclonedx-bom==3.11.1 && \
+                            
+                            # 2. USAMOS EL COMANDO ANTIGUO (Ahora sí funcionará)
+                            # Generamos en JSON (-f json) que es el nativo de esta versión
+                            cyclonedx-py-requirements -f json -o bom.json && \
+                            
                             echo 'Verificando archivo BOM:' && \
-                            ls -lh bom.xml && \
+                            ls -lh bom.json && \
+                            
+                            # 3. ENVIAMOS EL JSON A DEPENDENCY TRACK
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -H 'X-Api-Key: ${DT_API_KEY}' \
                                 -F 'autoCreate=true' \
                                 -F 'projectName=Pygoat' \
                                 -F 'projectVersion=1.0' \
-                                -F 'bom=@bom.xml' \
+                                -F 'bom=@bom.json' \
                         "
                     """
                 }
