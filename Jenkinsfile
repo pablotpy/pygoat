@@ -44,7 +44,7 @@ pipeline {
             }
         }
 
-stage('SCA - Dependency Track') {
+        stage('SCA - Dependency Track') {
             steps {
                 script {
                     echo "--- Generando SBOM (JSON Nativo) ---"
@@ -52,15 +52,9 @@ stage('SCA - Dependency Track') {
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             apt-get update && apt-get install -y curl && \
                             pip install cyclonedx-bom && \
-                            
-                            # Generamos el SBOM. Usamos -o para salida. 
-                            # Al llamarlo .json, la herramienta suele detectar el formato o usar el default (JSON).
                             cyclonedx-py requirements requirements.txt -o bom.json && \
-                            
                             echo 'Verificando archivo BOM:' && \
                             ls -lh bom.json && \
-                            
-                            # Subimos el JSON a Dependency Track
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -H 'X-Api-Key: ${DT_API_KEY}' \
@@ -90,7 +84,6 @@ stage('SCA - Dependency Track') {
             steps {
                 script {
                     echo "--- Subiendo a DefectDojo ---"
-                    // Verifica que los archivos existen antes de subir
                     sh "ls -lh bandit_report.json gitleaks_report.json"
                     
                     sh """
@@ -100,7 +93,7 @@ stage('SCA - Dependency Track') {
                                 -H 'Content-Type: multipart/form-data' \
                                 -F 'active=true' \
                                 -F 'verified=true' \
-                                -F 'scan_type=Bandit' \
+                                -F 'scan_type=Bandit Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@bandit_report.json' && \
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
