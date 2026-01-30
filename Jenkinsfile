@@ -90,19 +90,21 @@ stage('SCA - Dependency Track') {
             steps {
                 script {
                     echo "--- Subiendo a DefectDojo ---"
-                    // Verifica que los archivos existen antes de subir
                     sh "ls -lh bandit_report.json gitleaks_report.json"
                     
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
+                            # CORRECCIÓN: Cambiamos 'Bandit' por 'Bandit Scan'
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -F 'active=true' \
                                 -F 'verified=true' \
-                                -F 'scan_type=Bandit' \
+                                -F 'scan_type=Bandit Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@bandit_report.json' && \
+                            
+                            # Gitleaks ya estaba bien
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
@@ -116,5 +118,3 @@ stage('SCA - Dependency Track') {
                 }
             }
         }
-    }
-}
