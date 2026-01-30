@@ -9,10 +9,9 @@ pipeline {
         // Credenciales
         DD_API_KEY = credentials('dd-api-key')
         DT_API_KEY = credentials('dt-api-key')
-        DD_ENGAGEMENT_ID = '1' // <--- TU ID AQUÍ
+        DD_ENGAGEMENT_ID = '1' 
         
-        // Configuración común de Docker para no repetir
-        // Montamos el volumen exacto y la red devsecops-net
+        // Configuración Docker
         DOCKER_ARGS = '--rm --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
     }
 
@@ -32,12 +31,13 @@ pipeline {
         stage('SAST - Bandit') {
             steps {
                 script {
-                    echo "Ejecutando Bandit en contenedor Python..."
-                    // Ejecutamos docker run manual, igual que en tu prueba
+                    echo "--- Ejecutando Bandit ---"
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             pip install bandit && \
-                            bandit -r . -f json -o bandit_report.json || true \
+                            echo 'Iniciando escaneo...' && \
+                            bandit -r . -f json -o bandit_report.json || true && \
+                            ls -lh bandit_report.json \
                         "
                     """
                 }
@@ -47,12 +47,15 @@ pipeline {
         stage('SCA - Dependency Track') {
             steps {
                 script {
-                    echo "Generando SBOM y enviando a Dependency Track..."
+                    echo "--- Generando SBOM (XML) ---"
+                    // CORRECCIÓN: Agregamos '--format xml'
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             apt-get update && apt-get install -y curl && \
                             pip install cyclonedx-bom && \
-                            cyclonedx-py requirements requirements.txt -o bom.xml && \
+                            cyclonedx-py requirements requirements.txt --format xml --output bom.xml && \
+                            echo 'Verificando archivo BOM:' && \
+                            ls -lh bom.xml && \
                             curl -v -X POST '${DT_URL}/api/v1/bom' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -H 'X-Api-Key: ${DT_API_KEY}' \
@@ -69,8 +72,7 @@ pipeline {
         stage('Secrets - Gitleaks') {
             steps {
                 script {
-                    echo "Buscando secretos..."
-                    // Gitleaks ya trae su propio binario, no necesita /bin/bash -c complicado
+                    echo "--- Ejecutando Gitleaks ---"
                     sh """
                         docker run ${DOCKER_ARGS} zricethezav/gitleaks:latest \
                         detect -v --source . --report-path gitleaks_report.json --exit-code 0
@@ -82,8 +84,10 @@ pipeline {
         stage('Upload to DefectDojo') {
             steps {
                 script {
-                    echo "Subiendo reportes a DefectDojo..."
-                    // Usamos una imagen con CURL para subir los archivos
+                    echo "--- Subiendo a DefectDojo ---"
+                    // Verifica que los archivos existen antes de subir
+                    sh "ls -lh bandit_report.json gitleaks_report.json"
+                    
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
