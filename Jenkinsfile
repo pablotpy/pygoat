@@ -2,11 +2,12 @@ pipeline {
     agent any
 
     environment {
+        // Mantenemos tu URL (incluso con el typo 'dependecy' si así se llama tu container)
         DT_URL = 'http://dependecy-track-dtrack-apiserver-1:8080' 
         DD_URL = 'http://django-defectdojo-nginx-1:8080'
         DD_API_KEY = credentials('dd-api-key')
         DT_API_KEY = credentials('dt-api-key')
-        DD_ENGAGEMENT_ID = '5' // Asegúrate de usar el ID correcto
+        DD_ENGAGEMENT_ID = '5'
         DOCKER_ARGS = '--rm --entrypoint="" --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
     }
 
@@ -55,7 +56,7 @@ pipeline {
             }
         }
 
-        stage('SCA - Dependency Track (Análisis Puro)') {
+        stage('SCA - Dependency Track (Puro & Robusto)') {
             steps {
                 script {
                     def dtScript = """#!/bin/bash
@@ -65,8 +66,6 @@ pipeline {
                     pip install cyclonedx-bom -q
                     
                     echo "--- Generando BOM (Inventario) ---"
-                    # Usamos la herramienta nativa de Python, NO Trivy.
-                    # Esto genera un BOM limpio, obligando a DT a hacer el analisis.
                     cyclonedx-py requirements requirements.txt -o bom_inventory.json
                     
                     echo "--- Subiendo Inventario a DT ---"
@@ -84,6 +83,10 @@ pipeline {
                     
                     echo "--- Obteniendo UUID ---"
                     curl -s -H "X-Api-Key: \$DT_API_KEY" "\$DT_URL/api/v1/project/lookup?name=Pygoat&version=1.0" > dt_project.json
+                    
+                    # Debug: Ver contenido del proyecto
+                    cat dt_project.json
+                    
                     PROJECT_UUID=\$(cat dt_project.json | python3 -c "import sys, json; print(json.load(sys.stdin).get('uuid', ''))" 2>/dev/null)
                     
                     if [ -z "\$PROJECT_UUID" ]; then
@@ -91,16 +94,50 @@ pipeline {
                         exit 1
                     fi
                     
-                    echo "UUID: \$PROJECT_UUID"
+                    echo "UUID Objetivo: \$PROJECT_UUID"
                     
-                    echo "--- Descargando Findings (Resultados del Análisis) ---"
-                    # Descargamos la lista de fallos detectados por DT
-                    curl -s -H "X-Api-Key: \$DT_API_KEY" \
-                        "\$DT_URL/api/v1/finding/project/\$PROJECT_UUID?suppressed=false" \
-                        -o dt_findings.json
+                    echo "--- Descargando Findings (Con Reintentos) ---"
+                    SUCCESS=0
                     
-                    SIZE=\$(wc -c < dt_findings.json)
-                    echo "Findings descargados. Tamaño: \$SIZE bytes"
+                    # Intentamos descargar hasta 5 veces
+                    for i in 1 2 3 4 5; do
+                        echo "Intento \$i de descarga..."
+                        
+                        # Capturamos codigo HTTP y contenido
+                        HTTP_CODE=\$(curl -w "%{http_code}" -s -H "X-Api-Key: \$DT_API_KEY" \
+                            "\$DT_URL/api/v1/finding/project/\$PROJECT_UUID?suppressed=false" \
+                            -o dt_findings.json)
+                        
+                        echo "Codigo HTTP: \$HTTP_CODE"
+                        
+                        # Verificamos si es 200 OK
+                        if [ "\$HTTP_CODE" == "200" ]; then
+                            SIZE=\$(wc -c < dt_findings.json)
+                            echo "Tamaño archivo: \$SIZE bytes"
+                            
+                            # Si tiene contenido, salimos
+                            if [ "\$SIZE" -gt 2 ]; then
+                                echo "¡Descarga Exitosa!"
+                                SUCCESS=1
+                                break
+                            else
+                                echo "Archivo vacio o [] (Sin hallazgos aun). Reintentando..."
+                            fi
+                        else
+                            echo "Error en la API. Respuesta del servidor:"
+                            cat dt_findings.json
+                        fi
+                        
+                        sleep 10
+                    done
+                    
+                    if [ \$SUCCESS -eq 0 ]; then
+                        echo "ADVERTENCIA: No se pudieron descargar findings validos."
+                        # Creamos un array vacio valido para que DefectDojo no falle con 400 Bad Request
+                        echo '[]' > dt_findings.json
+                    fi
+                    
+                    ls -lh dt_findings.json
                     """
                     
                     writeFile file: 'run_dt_pure.sh', text: dtScript
@@ -148,8 +185,8 @@ pipeline {
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@gitleaks_report.json' && \
                             
-                            # 3. DT FINDINGS (Nombre EXACTO descubierto)
-                            # Aquí usamos el archivo de findings puro, no el BOM.
+                            # 3. DT FINDINGS (FPF Export)
+                            # Usamos el archivo puro descargado de la API
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
