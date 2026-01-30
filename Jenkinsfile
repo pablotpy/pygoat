@@ -6,9 +6,9 @@ pipeline {
         DD_URL = 'http://django-defectdojo-nginx-1:8080'
         DD_API_KEY = credentials('dd-api-key')
         DT_API_KEY = credentials('dt-api-key')
-        // Cambia el ID si quieres separar los hallazgos de master
         DD_ENGAGEMENT_ID = '4' 
-        DOCKER_ARGS = '--rm --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
+        // IMPORTANTE: Agregamos --entrypoint="" para poder ejecutar comandos bash antes de gitleaks
+        DOCKER_ARGS = '--rm --entrypoint="" --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
     }
 
     stages {
@@ -16,36 +16,27 @@ pipeline {
             steps { cleanWs() }
         }
         
-        stage('Checkout (Forzando Master)') {
+        stage('Checkout (Full Master)') {
             steps {
-                //Aquí le decimos que descargue MASTER (o main) 
-                // aunque el Jenkinsfile venga de 'desarrollo'.
+                // Descargamos TODA la historia (depth: 0) de la rama MASTER
                 checkout([
                     $class: 'GitSCM',
-                    // CAMBIO: Apuntamos a master para buscar secretos antiguos
                     branches: [[name: '*/master']], 
                     doGenerateSubmoduleConfigurations: false,
                     extensions: [[$class: 'CloneOption', depth: 0, noTags: false, reference: '', shallow: false]],
                     userRemoteConfigs: [[url: 'https://github.com/pablotpy/pygoat.git']]
                 ])
-                
-                script {
-                    echo "--- Verificando en qué rama estamos ---"
-                    sh "git branch -a"
-                    sh "git log -1" // Para confirmar que es el último commit de master
-                }
             }
         }
 
-        stage('SAST - Bandit (Solo Críticas)') {
+        stage('SAST - Bandit (Solo Criticas)') {
             steps {
                 script {
-                    echo "--- Ejecutando Bandit (Filtro CRÍTICO) ---"
-                    // Bandit encontrará menos cosas (solo lo grave)
+                    echo "--- Ejecutando Bandit (Filtrado) ---"
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             pip install bandit && \
-                            # FILTRO APLICADO: -lll (High Sev) -iii (High Conf)
+                            # Filtro estricto: Solo Altas (-lll) y Confianza Alta (-iii)
                             bandit -r . -lll -iii -f json -o bandit_report.json || true && \
                             ls -lh bandit_report.json \
                         "
@@ -57,7 +48,7 @@ pipeline {
         stage('SCA - Dependency Track') {
             steps {
                 script {
-                    // Nota: Si requirements.txt es distinto en master, DT mostrará cosas distintas
+                    echo "--- Generando SBOM ---"
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             apt-get update && apt-get install -y curl && \
@@ -76,15 +67,18 @@ pipeline {
             }
         }
 
-        stage('Secrets - Gitleaks (Full History)') {
+        stage('Secrets - Gitleaks (Nuclear)') {
             steps {
                 script {
-                    echo "--- Buscando Secretos en Historial de Master ---"
-                    // Al haber bajado 'master' con historial completo (depth:0),
-                    // Gitleaks encontrará todo lo que haya pasado en esa rama.
+                    echo "--- Ejecutando Gitleaks v8.18.1 (Modo Histórico Total) ---"
+                    // 1. Usamos la versión v8.18.1 (específica)
+                    // 2. Configuramos safe.directory para que Docker pueda leer el .git
+                    // 3. Usamos --log-opts=--all para leer TODO el historial de git
                     sh """
-                        docker run ${DOCKER_ARGS} zricethezav/gitleaks:latest \
-                        detect -v --source . --report-path gitleaks_report.json --exit-code 0
+                        docker run ${DOCKER_ARGS} zricethezav/gitleaks:v8.18.1 /bin/bash -c " \
+                            git config --global --add safe.directory '*' && \
+                            gitleaks detect -v --source . --log-opts='--all' --report-path gitleaks_report.json --exit-code 0 \
+                        "
                     """
                 }
             }
@@ -94,6 +88,7 @@ pipeline {
             steps {
                 script {
                     echo "--- Subiendo Reportes ---"
+                    // Recuerda borrar el engagement viejo para ver el cambio real
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
