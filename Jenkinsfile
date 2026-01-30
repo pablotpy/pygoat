@@ -55,7 +55,7 @@ pipeline {
             }
         }
 
-        stage('SCA - Dependency Track (Con Reintentos)') {
+        stage('SCA - Dependency Track (Doble Verificación)') {
             steps {
                 script {
                     echo "--- 1. Subiendo Inventario a DT ---"
@@ -64,10 +64,8 @@ pipeline {
                             apt-get update && apt-get install -y curl && \
                             pip install cyclonedx-bom && \
                             
-                            # Generar BOM
                             cyclonedx-py requirements requirements.txt -o bom_local.json && \
                             
-                            # Subir a DT
                             echo 'Subiendo BOM...' && \
                             curl -X POST '${DT_URL}/api/v1/bom' \
                                 -H 'Content-Type: multipart/form-data' \
@@ -77,38 +75,57 @@ pipeline {
                                 -F 'projectVersion=1.0' \
                                 -F 'bom=@bom_local.json' && \
                                 
-                            echo '--- 2. Esperando procesamiento inicial (10s) ---' && \
-                            sleep 10 && \
-                            
-                            echo '--- 3. Obteniendo UUID ---' && \
-                            curl -s -H 'X-Api-Key: ${DT_API_KEY}' '${DT_URL}/api/v1/project/lookup?name=Pygoat&version=1.0' > dt_project.json && \
-                            PROJECT_UUID=\$(cat dt_project.json | python3 -c \"import sys, json; print(json.load(sys.stdin)['uuid'])\") && \
-                            echo \"UUID Detectado: \$PROJECT_UUID\" && \
-                            
-                            echo '--- 4. Bucle de Espera (Polling) para Findings ---' && \
-                            # Intentamos descargar hasta 10 veces (esperando 15s entre cada vez = 2.5 min max)
+                            echo '--- 2. BUCLE 1: Obteniendo UUID (Esperando creación) ---' && \
+                            PROJECT_UUID=\"\"; \
+                            for i in 1 2 3 4 5; do \
+                                echo \"Intento \$i para obtener UUID...\"; \
+                                curl -s -H 'X-Api-Key: ${DT_API_KEY}' '${DT_URL}/api/v1/project/lookup?name=Pygoat&version=1.0' > dt_project.json; \
+                                \
+                                # Validamos si el archivo tiene algo antes de pasarlo a Python \
+                                if [ -s dt_project.json ]; then \
+                                    # Intentamos extraer UUID de forma segura (sin que rompa el script) \
+                                    EXTRACTED=\$(cat dt_project.json | python3 -c \"import sys, json; print(json.load(sys.stdin).get('uuid', ''))\" 2>/dev/null); \
+                                    if [ ! -z \"\$EXTRACTED\" ]; then \
+                                        PROJECT_UUID=\$EXTRACTED; \
+                                        echo \"¡UUID Encontrado: \$PROJECT_UUID!\"; \
+                                        break; \
+                                    fi; \
+                                fi; \
+                                echo \"Proyecto no listo aún. Esperando 5s...\"; \
+                                sleep 5; \
+                            done; \
+                            \
+                            if [ -z \"\$PROJECT_UUID\" ]; then \
+                                echo \"ERROR FATAL: No se pudo obtener el UUID después de 5 intentos.\"; \
+                                cat dt_project.json; \
+                                exit 1; \
+                            fi && \
+                            \
+                            echo '--- 3. BUCLE 2: Descargando Findings (Esperando análisis) ---' && \
                             SUCCESS=0; \
-                            for i in 1 2 3 4 5 6 7 8 9 10; do \
-                                echo \"Intento \$i: Descargando findings...\" && \
+                            for i in \$(seq 1 20); do \
+                                echo \"Intento \$i de 20: Consultando findings...\"; \
+                                \
                                 curl -s -H 'X-Api-Key: ${DT_API_KEY}' \
                                     '${DT_URL}/api/v1/finding/project/\$PROJECT_UUID?suppressed=false' \
                                     -o dt_findings.json; \
                                 \
-                                # Verificamos si el archivo tiene tamaño mayor a 0 y es un JSON válido (empieza con corchete)
-                                if [ -s dt_findings.json ] && head -n 1 dt_findings.json | grep -q '\\['; then \
-                                    echo \"¡Findings descargados correctamente!\"; \
+                                # Logica de Bytes: Si pesa mas de 10 bytes, tiene datos \
+                                FILE_SIZE=\$(wc -c < dt_findings.json); \
+                                echo \"Tamaño recibido: \$FILE_SIZE bytes\"; \
+                                \
+                                if [ \"\$FILE_SIZE\" -gt 10 ]; then \
+                                    echo \"¡EXITO! Datos recibidos.\"; \
                                     SUCCESS=1; \
                                     break; \
                                 else \
-                                    echo \"Aún no hay resultados o DT está procesando. Esperando 15s...\"; \
+                                    echo \"Analisis en curso (recibido vacio). Esperando 15s...\"; \
                                     sleep 15; \
                                 fi \
                             done; \
                             \
                             if [ \$SUCCESS -eq 0 ]; then \
-                                echo \"ERROR: Tiempo de espera agotado. DT no respondió con findings válidos.\"; \
-                                # Creamos un archivo vacio valido [] para que no rompa el siguiente paso, \
-                                # pero avisamos del error \
+                                echo \"WARNING: Timeout en analisis. Usando archivo vacio.\"; \
                                 echo '[]' > dt_findings.json; \
                             fi && \
                             \
@@ -123,7 +140,6 @@ pipeline {
             steps {
                 script {
                     echo "--- Subiendo Reportes ---"
-                    // Verificamos existencia
                     sh "ls -lh bandit_report.json gitleaks_report.json dt_findings.json"
                     
                     sh """
