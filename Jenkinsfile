@@ -71,10 +71,12 @@ pipeline {
         stage('Secrets - Gitleaks') {
             steps {
                 script {
-                    echo "--- Ejecutando Gitleaks ---"
+                    echo "--- Ejecutando Gitleaks (Modo No-Git / Exhaustivo) ---"
+                    // CAMBIO: Agregado --no-git
+                    // Esto escanea todos los archivos físicos presentes, ignorando el historial limitado de Jenkins
                     sh """
                         docker run ${DOCKER_ARGS} zricethezav/gitleaks:latest \
-                        detect -v --source . --report-path gitleaks_report.json --exit-code 0
+                        detect -v --no-git --source . --report-path gitleaks_report.json --exit-code 0
                     """
                 }
             }
@@ -86,6 +88,8 @@ pipeline {
                     echo "--- Subiendo a DefectDojo ---"
                     sh "ls -lh bandit_report.json gitleaks_report.json"
                     
+                    // IMPORTANTE: Recuerda borrar el Engagement en DefectDojo antes de correr esto
+                    // para ver la diferencia de cantidad de secretos.
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
