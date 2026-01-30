@@ -7,7 +7,6 @@ pipeline {
         DD_API_KEY = credentials('dd-api-key')
         DT_API_KEY = credentials('dt-api-key')
         DD_ENGAGEMENT_ID = '4' 
-        // Entrypoint vacío para poder usar comandos custom
         DOCKER_ARGS = '--rm --entrypoint="" --network devsecops-net -v /var/jenkins_home:/var/jenkins_home -w ${WORKSPACE}'
     }
 
@@ -28,21 +27,37 @@ pipeline {
             }
         }
 
-        stage('SAST - Bandit (Solo Criticas)') {
+        stage('SAST - Bandit (Solo Criticas/Altas)') {
             steps {
                 script {
-                    echo "--- Ejecutando Bandit (Filtrado) ---"
+                    echo "--- Ejecutando Bandit ---"
+                    // Nota: Quitamos el filtro estricto AQUI para dejar que DefectDojo filtre después.
+                    // Generamos un reporte completo para no perder datos antes de tiempo.
                     sh """
                         docker run ${DOCKER_ARGS} python:3.10-slim /bin/bash -c " \
                             pip install bandit && \
-                            bandit -r . -lll -iii -f json -o bandit_report.json || true \
+                            bandit -r . -f json -o bandit_report.json || true \
                         "
                     """
                 }
             }
         }
 
-        stage('SCA - Dependency Track (Analisis y Descarga)') {
+        stage('Secrets - Gitleaks') {
+            steps {
+                script {
+                    echo "--- Ejecutando Gitleaks ---"
+                    sh """
+                        docker run ${DOCKER_ARGS} -u root:root zricethezav/gitleaks:v8.18.1 /bin/bash -c " \
+                            git config --global --add safe.directory '*' && \
+                            gitleaks detect -v --source . --log-opts='--all' --report-path gitleaks_report.json --exit-code 0 \
+                        "
+                    """
+                }
+            }
+        }
+
+        stage('SCA - Dependency Track (Flujo Completo)') {
             steps {
                 script {
                     echo "--- 1. Subiendo Inventario a DT ---"
@@ -51,7 +66,7 @@ pipeline {
                             apt-get update && apt-get install -y curl && \
                             pip install cyclonedx-bom && \
                             
-                            # Generar BOM Local (Sin vulnerabilidades, solo lista)
+                            # Generar BOM
                             cyclonedx-py requirements requirements.txt -o bom_local.json && \
                             
                             # Subir a DT
@@ -63,38 +78,26 @@ pipeline {
                                 -F 'projectVersion=1.0' \
                                 -F 'bom=@bom_local.json' && \
                                 
-                            echo '--- 2. Esperando a que DT analice (45 segundos) ---' && \
-                            sleep 45 && \
+                            echo '--- 2. Esperando analisis (30s) ---' && \
+                            sleep 30 && \
                             
-                            echo '--- 3. Obteniendo UUID del Proyecto en DT ---' && \
-                            # Consultamos a la API el UUID usando el nombre y version
-                            PROJECT_UUID=\$(curl -s -H 'X-Api-Key: ${DT_API_KEY}' \
-                                '${DT_URL}/api/v1/project/lookup?name=Pygoat&version=1.0' | \
-                                python3 -c \"import sys, json; print(json.load(sys.stdin)['uuid'])\") && \
+                            echo '--- 3. Obteniendo UUID ---' && \
+                            # Obtenemos el UUID e imprimimos para depurar
+                            curl -s -H 'X-Api-Key: ${DT_API_KEY}' '${DT_URL}/api/v1/project/lookup?name=Pygoat&version=1.0' > dt_project.json && \
+                            cat dt_project.json && \
                             
-                            echo \"UUID detectado: \$PROJECT_UUID\" && \
+                            # Extraemos UUID con python
+                            PROJECT_UUID=\$(cat dt_project.json | python3 -c \"import sys, json; print(json.load(sys.stdin)['uuid'])\") && \
+                            echo \"UUID es: \$PROJECT_UUID\" && \
                             
-                            echo '--- 4. Descargando BOM Enriquecido (Con Vulnerabilidades) ---' && \
-                            # Descargamos el JSON procesado desde DT
+                            echo '--- 4. Descargando Reporte Enriquecido ---' && \
+                            # Descargamos el JSON final
                             curl -s -H 'X-Api-Key: ${DT_API_KEY}' \
                                 '${DT_URL}/api/v1/bom/cyclonedx/project/\$PROJECT_UUID' \
                                 -o bom_enriched.json && \
                             
+                            # Verificamos si se descargó bien (si pesa 0 bytes, fallará luego)
                             ls -lh bom_enriched.json \
-                        "
-                    """
-                }
-            }
-        }
-
-        stage('Secrets - Gitleaks') {
-            steps {
-                script {
-                    echo "--- Ejecutando Gitleaks v8.18.1 ---"
-                    sh """
-                        docker run ${DOCKER_ARGS} -u root:root zricethezav/gitleaks:v8.18.1 /bin/bash -c " \
-                            git config --global --add safe.directory '*' && \
-                            gitleaks detect -v --source . --log-opts='--all' --report-path gitleaks_report.json --exit-code 0 \
                         "
                     """
                 }
@@ -104,41 +107,43 @@ pipeline {
         stage('Upload to DefectDojo') {
             steps {
                 script {
-                    echo "--- Subiendo Reportes (SOLO CRITICAS) ---"
+                    echo "--- Subiendo Reportes (Filtro: High & Critical) ---"
+                    // Verificamos existencia de archivos antes de subir
+                    sh "ls -lh bandit_report.json gitleaks_report.json bom_enriched.json"
+                    
                     sh """
                         docker run ${DOCKER_ARGS} curlimages/curl:latest /bin/sh -c " \
-                            # 1. BANDIT
+                            # 1. BANDIT (Filtro High)
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -F 'active=true' \
                                 -F 'verified=true' \
-                                -F 'minimum_severity=Critical' \
+                                -F 'minimum_severity=High' \
                                 -F 'close_old_findings=true' \
                                 -F 'scan_type=Bandit Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@bandit_report.json' && \
                             
-                            # 2. GITLEAKS
+                            # 2. GITLEAKS (Filtro High)
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -F 'active=true' \
                                 -F 'verified=true' \
-                                -F 'minimum_severity=Critical' \
+                                -F 'minimum_severity=High' \
                                 -F 'close_old_findings=true' \
                                 -F 'scan_type=Gitleaks Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
                                 -F 'file=@gitleaks_report.json' && \
                             
-                            # 3. SBOM ENRIQUECIDO (Desde DT)
-                            # Ahora subimos 'bom_enriched.json' que viene de DT con los fallos ya detectados
+                            # 3. SBOM ENRIQUECIDO (Filtro High)
                             curl -v -X POST '${DD_URL}/api/v2/import-scan/' \
                                 -H 'Authorization: Token ${DD_API_KEY}' \
                                 -H 'Content-Type: multipart/form-data' \
                                 -F 'active=true' \
                                 -F 'verified=true' \
-                                -F 'minimum_severity=Critical' \
+                                -F 'minimum_severity=High' \
                                 -F 'close_old_findings=true' \
                                 -F 'scan_type=CycloneDX Scan' \
                                 -F 'engagement=${DD_ENGAGEMENT_ID}' \
